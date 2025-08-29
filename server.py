@@ -6,78 +6,59 @@ import time
 
 app = Flask(__name__)
 
+# Configuration directe dans le code (au lieu de variables d'env)
+APP_CONFIG = {
+    "cache_dir": "/tmp/yt-dlp-cache",
+    "no_update_check": True,
+    "debug_mode": False  # Change à True pour plus de logs
+}
+
 def get_site_specific_config(url):
     """Configuration spécifique selon le site"""
     
-    # Configuration de base
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ]
+    
     base_config = {
-        "quiet": True,
+        "quiet": not APP_CONFIG["debug_mode"],
         "no_warnings": True,
         "format": "mp4/best[ext=mp4]/best",
         "socket_timeout": 45,
         "retries": 3,
         "force_ipv4": True,
+        "cachedir": APP_CONFIG["cache_dir"],
+        "no_check_certificate": True,  # Ignore les certificats SSL invalides
     }
-    
-    # Headers communs anti-détection
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ]
     
     base_headers = {
         "User-Agent": random.choice(user_agents),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
     }
     
     # Configuration spécifique par site
     if "sibnet.ru" in url:
-        base_config.update({
-            "http_headers": {
-                **base_headers,
-                "Referer": "https://video.sibnet.ru/",
-                "Origin": "https://video.sibnet.ru"
-            }
-        })
-    
+        base_config["http_headers"] = {
+            **base_headers,
+            "Referer": "https://video.sibnet.ru/",
+            "Origin": "https://video.sibnet.ru"
+        }
     elif "vk.com" in url:
-        base_config.update({
-            "http_headers": {
-                **base_headers,
-                "Referer": "https://vk.com/",
-                "Origin": "https://vk.com"
-            },
-            # Utilise l'extracteur spécifique VK si disponible
-            "extractor_args": {
-                "generic": {"default_search": "auto"}
-            }
-        })
-    
-    elif "vidmoly.net" in url or "myvi" in url:
-        base_config.update({
-            "http_headers": {
-                **base_headers,
-                "Referer": url.split('/')[0] + '//' + url.split('/')[2] + '/',
-            }
-        })
-    
-    elif "sendvid.com" in url or "oneupload.to" in url:
-        base_config.update({
-            "http_headers": {
-                **base_headers,
-                "Referer": url,
-            },
-            "format": "best[ext=mp4]/mp4/best"
-        })
-    
-    else:  # Pour smoothpre.com, movearnpre.com, etc.
-        base_config.update({
-            "http_headers": base_headers
-        })
+        base_config["http_headers"] = {
+            **base_headers,
+            "Referer": "https://vk.com/",
+        }
+    elif any(site in url for site in ["vidmoly.net", "myvi", "sendvid.com"]):
+        domain = url.split('/')[2] if '/' in url else ""
+        base_config["http_headers"] = {
+            **base_headers,
+            "Referer": f"https://{domain}/",
+        }
+    else:
+        base_config["http_headers"] = base_headers
     
     return base_config
 
@@ -87,8 +68,15 @@ def api_extract():
     if not url:
         return jsonify({"success": False, "error": "Missing url param"}), 400
     
+    # Log pour debug (seulement si PYTHONUNBUFFERED=1)
+    if APP_CONFIG["debug_mode"]:
+        print(f"Processing URL: {url}")
+    
     try:
-        # Stratégie 1: Configuration optimisée pour le site
+        # Nettoie le cache au début (remplace la variable d'env)
+        clear_cache()
+        
+        # Stratégie principale
         ydl_opts = get_site_specific_config(url)
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -96,16 +84,13 @@ def api_extract():
             video_url = info.get("url")
             
             if not video_url and info.get("formats"):
-                # Cherche le meilleur format mp4
-                mp4_formats = [f for f in info["formats"] 
-                              if f.get("ext") == "mp4" and f.get("url")]
-                if mp4_formats:
-                    # Trie par qualité (hauteur)
-                    mp4_formats_sorted = sorted(mp4_formats, 
-                                              key=lambda f: f.get("height", 0), reverse=True)
-                    video_url = mp4_formats_sorted[0]["url"]
-                else:
-                    # Fallback : n'importe quel format avec URL
+                for fmt in info["formats"]:
+                    if fmt.get("ext") == "mp4" and fmt.get("url"):
+                        video_url = fmt["url"]
+                        break
+                
+                # Fallback : premier format avec URL
+                if not video_url:
                     for fmt in info["formats"]:
                         if fmt.get("url"):
                             video_url = fmt["url"]
@@ -119,66 +104,64 @@ def api_extract():
                     "site": url.split('/')[2] if '/' in url else "unknown"
                 })
         
-        # Stratégie 2: Fallback avec extracteur générique
-        time.sleep(random.uniform(1, 3))  # Délai aléatoire
+        # Stratégie fallback simplifiée
+        time.sleep(random.uniform(1, 2))
         
-        generic_opts = {
+        simple_opts = {
             "quiet": True,
-            "format": "worst[ext=mp4]/worst",  # Qualité minimale
-            "force_ipv4": True,
-            "socket_timeout": 30,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-                "Referer": url
-            }
+            "format": "worst",
+            "http_headers": {"User-Agent": random.choice([
+                "Mozilla/5.0 (compatible; Googlebot/2.1)",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            ])},
+            "socket_timeout": 20
         }
         
-        with yt_dlp.YoutubeDL(generic_opts) as ydl:
+        with yt_dlp.YoutubeDL(simple_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if info and info.get("url"):
                 return jsonify({
                     "success": True,
                     "title": info.get("title", "Unknown"),
                     "url": info["url"],
-                    "method": "generic_fallback"
+                    "method": "fallback"
                 })
         
         return jsonify({
             "success": False, 
-            "error": "Video URL not found"
+            "error": "Video URL not extractable"
         }), 404
         
     except Exception as e:
         error_msg = str(e).lower()
-        if "403" in error_msg or "forbidden" in error_msg:
+        if "403" in error_msg:
             return jsonify({
                 "success": False, 
-                "error": "Site blocking detected",
-                "suggestion": f"Site {url.split('/')[2] if '/' in url else 'unknown'} may be blocking cloud IPs"
+                "error": "Access forbidden by site",
+                "suggestion": "Site blocking detected - try different URL or wait"
             }), 403
-        elif "timeout" in error_msg:
-            return jsonify({
-                "success": False, 
-                "error": "Connection timeout",
-                "suggestion": "Try again later"
-            }), 408
-        else:
-            return jsonify({
-                "success": False, 
-                "error": str(e)
-            }), 500
+        return jsonify({"success": False, "error": str(e)}), 500
+
+def clear_cache():
+    """Nettoie le cache yt-dlp"""
+    try:
+        import shutil
+        cache_dir = APP_CONFIG["cache_dir"]
+        if os.path.exists(cache_dir):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    except:
+        pass
 
 @app.route("/", methods=["GET"])
 def home():
-    supported_sites = [
-        "vidmoly.net", "video.sibnet.ru", "vk.com", "sendvid.com", 
-        "myvi.top", "movearnpre.com", "oneupload.to", "smoothpre.com", "myvi.tv"
-    ]
     return jsonify({
         "status": "Server running", 
         "endpoint": "/api/extract?url=YOUR_URL",
-        "supported_sites": supported_sites,
-        "note": "Optimized for alternative video platforms"
+        "config": "Single env var mode",
+        "supported_sites": [
+            "vidmoly.net", "video.sibnet.ru", "vk.com", "sendvid.com", 
+            "myvi.top", "movearnpre.com", "oneupload.to", "smoothpre.com", "myvi.tv"
+        ]
     })
 
 if __name__ == "__main__":
