@@ -2,3 +2,4 @@ flask
 httpx
 yt-dlp
 beautifulsoup4
+gunicorn
