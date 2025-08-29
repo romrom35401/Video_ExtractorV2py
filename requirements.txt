@@ -1,0 +1,4 @@
+flask
+httpx
+yt-dlp
+beautifulsoup4
